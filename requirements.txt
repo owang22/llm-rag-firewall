@@ -1,0 +1,15 @@
+# Core dependencies (all available in the system environment)
+numpy>=1.26
+pandas>=2.0
+scikit-learn>=1.2
+rich>=13.0
+tabulate>=0.9
+
+# LLM backends (optional — mock backend requires none of these)
+torch>=2.0                  # GPU inference
+transformers>=4.40          # HuggingFace pipeline backend
+vllm>=0.4                   # vLLM backend (fastest for bulk eval)
+sentencepiece>=0.2          # required by several tokenizers
+
+# Interactive demo extras (optional)
+streamlit>=1.30             # for a future Streamlit front-end
