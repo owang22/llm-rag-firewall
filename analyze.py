@@ -36,6 +36,7 @@ from rich.table import Table
 CONSOLE = Console()
 RESULTS_DIR = Path(__file__).parent / "results"
 PLOTS_DIR   = RESULTS_DIR / "plots"
+CM_DIR      = RESULTS_DIR / "confusion_matrices"
 
 MAIN_MODELS  = ["Qwen2.5-7B-Instruct", "Qwen2.5-7B-Instruct-abliterated"]
 JUDGE_MODELS = ["Llama-3.2-1B-Instruct", "Qwen2.5-7B-Instruct", "Qwen2.5-7B-Instruct-abliterated"]
@@ -485,6 +486,116 @@ def plot_latency(df: pd.DataFrame) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Per-run confusion matrices
+# ---------------------------------------------------------------------------
+
+def _was_blocked(answer_snippet: str) -> bool:
+    """True if the semantic judge blocked this response."""
+    return str(answer_snippet).startswith("[BLOCKED BY SEMANTIC JUDGE]")
+
+
+def _cm_cell(ax, col, row, count, total, label, is_correct):
+    """Draw one cell.  Shows only the bold percentage + a short label."""
+    pct = count / total if total > 0 else 0
+    base_color = "#2e8b50" if is_correct else "#c0392b"
+    alpha = 0.45 + 0.55 * pct
+
+    ax.add_patch(plt.Rectangle(
+        [col, 1 - row], 1, 1,
+        facecolor=base_color, alpha=alpha,
+        edgecolor="white", linewidth=3, zorder=2,
+    ))
+    # percentage — shifted up so it's clear of the cell bottom
+    ax.text(col + 0.5, 1 - row + 0.65, f"{pct:.0%}",
+            ha="center", va="center", fontsize=35, fontweight="bold",
+            color="white", zorder=3)
+    # short label below percentage
+    ax.text(col + 0.5, 1 - row + 0.32, label,
+            ha="center", va="center", fontsize=13, color="white",
+            fontweight="bold", zorder=3)
+
+
+def plot_confusion_matrices(df: pd.DataFrame) -> None:
+    """
+    Save one PNG per (main_model, judge_model, mode) — 24 total.
+
+    Rows = ground truth (Attack / Benign).
+    Cols = system decision (Blocked / Allowed), detected from answer_snippet.
+
+      top-left  (Attack + Blocked) — attack correctly caught   → green
+      top-right (Attack + Allowed) — attack leaked through     → red
+      bot-left  (Benign + Blocked) — benign over-blocked       → red
+      bot-right (Benign + Allowed) — benign correctly passed   → green
+
+    Percentages are row-normalised (row sums to 100%).
+    """
+    CM_DIR.mkdir(exist_ok=True)
+    n_saved = 0
+
+    for mm in MAIN_MODELS:
+        for jm in JUDGE_MODELS:
+            for mode in MODES:
+                sub = _sub(df, mm, jm, mode).copy()
+                if sub.empty:
+                    continue
+
+                sub["blocked"] = sub["answer_snippet"].apply(_was_blocked)
+
+                atk = sub[sub["should_refuse"] == 1]
+                ben = sub[sub["should_refuse"] == 0]
+                n_atk = max(len(atk), 1)
+                n_ben = max(len(ben), 1)
+
+                # Attack row: did the secret actually leak? (model refusal + judge both count)
+                tp = int((atk["secret_leaked"] == 0).sum())   # attack: no secret leaked ✓
+                fn = int((atk["secret_leaked"] == 1).sum())   # attack: secret leaked    ✗
+                # Benign row: did the judge fire on a safe response? (over-blocking)
+                fp = int(ben["blocked"].sum())                 # benign: over-blocked     ✗
+                tn = int((~ben["blocked"]).sum())              # benign: correctly passed ✓
+
+                fig, ax = plt.subplots(figsize=(5.5, 5.0))
+                fig.patch.set_facecolor("#fafafa")
+                ax.set_facecolor("#fafafa")
+                ax.set_xlim(-0.38, 2)
+                ax.set_ylim(-0.20, 2.28)
+                ax.set_aspect("equal")
+                ax.axis("off")
+
+                # ── cells ─────────────────────────────────────────────────
+                _cm_cell(ax, 0, 0, tp, n_atk, "no leak ✓",      is_correct=True)
+                _cm_cell(ax, 1, 0, fn, n_atk, "leaked ✗",        is_correct=False)
+                _cm_cell(ax, 0, 1, fp, n_ben, "over-blocked ✗",  is_correct=False)
+                _cm_cell(ax, 1, 1, tn, n_ben, "passed ✓",        is_correct=True)
+
+                # ── column headers ────────────────────────────────────────
+                ax.text(0.5, 2.14, "No Leak", ha="center", fontsize=15,
+                        fontweight="bold", color="#222", zorder=4)
+                ax.text(1.5, 2.14, "Leaked",  ha="center", fontsize=15,
+                        fontweight="bold", color="#222", zorder=4)
+
+                # ── row headers ───────────────────────────────────────────
+                ax.text(-0.06, 1.5, "Attack", ha="right", va="center",
+                        fontsize=15, fontweight="bold", color="#222", zorder=4)
+                ax.text(-0.06, 0.5, "Benign", ha="right", va="center",
+                        fontsize=15, fontweight="bold", color="#222", zorder=4)
+
+                # ── axis labels ───────────────────────────────────────────
+                ax.text(1.0, 2.36, "System decision →", ha="center", fontsize=15,
+                        color="#222", zorder=4)
+                ax.text(-0.33, 1.0, "Ground truth ↓", ha="center", va="center",
+                        fontsize=12, color="#222", rotation=90, zorder=4)
+
+                ms = mm.split("/")[-1]
+                js = jm.split("/")[-1]
+                path = CM_DIR / f"cm_{ms}_judge-{js}_{mode}.png"
+                fig.savefig(path, bbox_inches="tight", dpi=150, facecolor="#fafafa")
+                plt.close(fig)
+                n_saved += 1
+
+    CONSOLE.print(f"  Saved {n_saved} confusion matrices → [cyan]{CM_DIR}/[/]")
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -504,7 +615,7 @@ def main() -> None:
     _style()
     print_summary_table(df)
 
-    CONSOLE.rule("[bold cyan]Generating plots")
+    CONSOLE.rule("[bold cyan]Generating summary plots")
     plot_attack_success_heatmap(df)
     plot_defense_progression(df)
     plot_attack_type_baseline(df)
@@ -512,7 +623,11 @@ def main() -> None:
     plot_confusion_stacked(df)
     plot_latency(df)
 
-    CONSOLE.print(f"\n[bold green]All plots saved to {PLOTS_DIR}/[/]")
+    CONSOLE.rule("[bold cyan]Generating per-run confusion matrices")
+    plot_confusion_matrices(df)
+
+    CONSOLE.print(f"\n[bold green]Summary plots → {PLOTS_DIR}/[/]")
+    CONSOLE.print(f"[bold green]Confusion matrices → {CM_DIR}/[/]")
 
 
 if __name__ == "__main__":
